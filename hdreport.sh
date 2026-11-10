@@ -1,17 +1,28 @@
 #!/bin/sh
 #
-# Server Passport v0.2
+# Server Passport v0.4
 # Universal read-only server inventory
 #
 # Supported:
 #   Linux (Debian, Ubuntu, RHEL, CentOS, etc.)
 #   FreeBSD
 #
-# Usage:
-#   ./server-passport.sh --help
+# Download:
+#   https://raw.githubusercontent.com/dmitriyvbiryukov-cyber/hdreport.sh/refs/heads/main/hdreport.sh
+#
+# Quick start:
+#   curl -fsSL "https://raw.githubusercontent.com/dmitriyvbiryukov-cyber/hdreport.sh/refs/heads/main/hdreport.sh" -o hdreport.sh
+#   chmod +x hdreport.sh
+#   ./hdreport.sh --quick
+#
+# Full report:
+#   ./hdreport.sh
+#
+# Help:
+#   ./hdreport.sh --help
 #
 
-VERSION="0.3"
+VERSION="0.4"
 
 PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 export PATH
@@ -38,6 +49,19 @@ cat <<EOF
 $PROGRAM - Server Passport v$VERSION
 
 Read-only technical inventory and diagnostic report.
+
+DOWNLOAD:
+  https://raw.githubusercontent.com/dmitriyvbiryukov-cyber/hdreport.sh/refs/heads/main/hdreport.sh
+
+QUICK START (download, make executable, run summary):
+  curl -fsSL "https://raw.githubusercontent.com/dmitriyvbiryukov-cyber/hdreport.sh/refs/heads/main/hdreport.sh" -o hdreport.sh
+  chmod +x hdreport.sh
+  ./hdreport.sh --quick
+
+RUN:
+  ./hdreport.sh           Full report + summary (default)
+  ./hdreport.sh --quick   Summary only
+  ./hdreport.sh --help    Show all options
 
 PURPOSE:
   Discover hardware, operating system, storage topology,
@@ -270,19 +294,19 @@ show_file() {
 # ------------------------------------------------------------
 
 TOOLS="
-dmidecode lshw lscpu hwinfo
+dmidecode lshw lscpu hwinfo lspci
 sysctl dmesg
 lsblk blkid fdisk
 smartctl nvme
 mdadm zpool zfs
 pvs vgs lvs
-geom gpart camcontrol
+geom gpart camcontrol pciconf devinfo kenv
 gmirror geli graid
 df mount swapinfo
 ip ifconfig netstat ss sockstat
 systemctl service
 ps top
-dpkg rpm pkg
+dpkg rpm pkg pkg_info
 nginx apachectl httpd
 mysql mysqld mariadb psql postgres
 php php-fpm redis-server
@@ -353,7 +377,19 @@ collect_hardware() {
             show_file "CPU details" /proc/cpuinfo
             run "Memory" free -h
             show_file "Memory details" /proc/meminfo
-            run "DMI information" dmidecode
+            if has dmidecode; then
+                run "SMBIOS: BIOS, system, motherboard and chassis" dmidecode -t bios -t system -t baseboard -t chassis -t processor
+                run "SMBIOS: memory arrays and DIMM inventory" dmidecode -t 16 -t 17
+                echo "Note: active memory channel mode is not consistently exposed by SMBIOS; it is not inferred from DIMM count."
+                run "SMBIOS: expansion slots" dmidecode -t 9
+                echo "Note: slot occupancy is firmware-reported; compare with the PCI device inventory below."
+            else
+                echo
+                echo "### SMBIOS inventory"
+                echo "[unavailable: dmidecode]"
+            fi
+            run "Memory banks and topology" lshw -class memory
+            run "PCI devices and drivers" lspci -nnk
             run "Hardware inventory" lshw -short
             ;;
         FreeBSD)
@@ -361,6 +397,18 @@ collect_hardware() {
             run "CPU count" sysctl hw.ncpu
             run "Physical memory" sysctl hw.physmem
             run "Memory statistics" vmstat -s
+            if has dmidecode; then
+                run "SMBIOS: BIOS, system, motherboard and chassis" dmidecode -t bios -t system -t baseboard -t chassis -t processor
+                run "SMBIOS: memory arrays and DIMM inventory" dmidecode -t 16 -t 17
+                echo "Note: active memory channel mode is not consistently exposed by SMBIOS; it is not inferred from DIMM count."
+                run "SMBIOS: expansion slots" dmidecode -t 9
+                echo "Note: slot occupancy is firmware-reported; compare with the PCI device inventory below."
+            else
+                echo
+                echo "### SMBIOS inventory"
+                echo "[unavailable: dmidecode; install/use dmidecode if available for this FreeBSD release]"
+            fi
+            run "PCI devices and bus locations" pciconf -lv
             run "Hardware messages" dmesg
             ;;
     esac
@@ -390,11 +438,8 @@ collect_storage() {
             ;;
         FreeBSD)
             run "GEOM disks" geom disk list
-            run "GEOM providers" geom provider list
-            run "Partition tables" gpart show -lp
+            run "Partition tables" gpart show -l
             run "CAM devices" camcontrol devlist -v
-            run "Gmirror configuration" gmirror list
-            run "GELI providers" geli list
             run "ZFS pools" zpool list
             run "ZFS topology" zpool status -v
             run "ZFS datasets" zfs list -t all
@@ -539,7 +584,13 @@ collect_packages() {
             fi
             ;;
         FreeBSD)
-            run "Installed packages" pkg info
+            if has pkg; then
+                run "Installed packages" pkg info
+            elif has pkg_info; then
+                run "Installed packages (legacy pkg_info)" pkg_info -a
+            else
+                echo "[No supported package manager]"
+            fi
             ;;
     esac
 }
@@ -575,6 +626,18 @@ summary_value() {
     echo "$1: $2"
 }
 
+clean_dmi_value() {
+    VALUE="$1"
+    case "`echo "$VALUE" | tr '[:upper:]' '[:lower:]'`" in
+        ""|"unknown"|"not specified"|"not applicable"|"to be filled by o.e.m."|"to be filled by oem"|"default string"|"system product name"|"base board product name")
+            echo ""
+            ;;
+        *)
+            echo "$VALUE"
+            ;;
+    esac
+}
+
 collect_summary() {
     echo
     echo "## SUMMARY"
@@ -587,6 +650,17 @@ collect_summary() {
         Linux)
             OS_NAME=`sed -n 's/^PRETTY_NAME=//p' /etc/os-release 2>/dev/null | head -n 1 | tr -d '"'`
             [ -n "$OS_NAME" ] || OS_NAME="Linux"
+            MB_VENDOR=`cat /sys/class/dmi/id/board_vendor 2>/dev/null`
+            MB_MODEL=`cat /sys/class/dmi/id/board_name 2>/dev/null`
+            MB_VERSION=`cat /sys/class/dmi/id/board_version 2>/dev/null`
+            MB_VENDOR=`clean_dmi_value "$MB_VENDOR"`
+            MB_MODEL=`clean_dmi_value "$MB_MODEL"`
+            MB_VERSION=`clean_dmi_value "$MB_VERSION"`
+            if [ -z "$MB_VENDOR" ] && [ -z "$MB_MODEL" ] && has dmidecode; then
+                MB_VENDOR=$(clean_dmi_value "$(dmidecode -s baseboard-manufacturer 2>/dev/null)")
+                MB_MODEL=$(clean_dmi_value "$(dmidecode -s baseboard-product-name 2>/dev/null)")
+                MB_VERSION=$(clean_dmi_value "$(dmidecode -s baseboard-version 2>/dev/null)")
+            fi
             CPU_MODEL=`awk -F: '/^model name[[:space:]]*:/ {sub(/^[ \t]+/,"",$2); print $2; exit}' /proc/cpuinfo 2>/dev/null`
             CPU_COUNT=`grep -c '^processor[[:space:]]*:' /proc/cpuinfo 2>/dev/null`
             [ -n "$CPU_COUNT" ] || CPU_COUNT="unknown"
@@ -621,6 +695,18 @@ collect_summary() {
             ;;
         FreeBSD)
             OS_NAME="FreeBSD"
+            MB_VENDOR=""
+            MB_MODEL=""
+            MB_VERSION=""
+            if has dmidecode; then
+                MB_VENDOR=$(clean_dmi_value "$(dmidecode -s baseboard-manufacturer 2>/dev/null)")
+                MB_MODEL=$(clean_dmi_value "$(dmidecode -s baseboard-product-name 2>/dev/null)")
+                MB_VERSION=$(clean_dmi_value "$(dmidecode -s baseboard-version 2>/dev/null)")
+            elif has kenv; then
+                MB_VENDOR=$(clean_dmi_value "$(kenv smbios.planar.maker 2>/dev/null)")
+                MB_MODEL=$(clean_dmi_value "$(kenv smbios.planar.product 2>/dev/null)")
+                MB_VERSION=$(clean_dmi_value "$(kenv smbios.planar.version 2>/dev/null)")
+            fi
             CPU_MODEL=`sysctl -n hw.model 2>/dev/null`
             CPU_COUNT=`sysctl -n hw.ncpu 2>/dev/null`
             [ -n "$CPU_COUNT" ] || CPU_COUNT="unknown"
@@ -641,21 +727,62 @@ collect_summary() {
             ;;
         *)
             OS_NAME="$OS"; CPU_MODEL="unknown"; CPU_COUNT="unknown"
+            MB_VENDOR=""; MB_MODEL=""; MB_VERSION=""
             MEM_VALUES="unknown"; SWAP_VALUES="unknown"; VIRT="unknown"
             ROOT_FS="unknown"; IP_ADDR=""; SERVICE_COUNT="unknown"; SERVICE_LABEL="unknown"
             ;;
     esac
 
     [ -n "$CPU_MODEL" ] || CPU_MODEL="unknown"
+    MOTHERBOARD=""
+    [ -n "$MB_VENDOR" ] && MOTHERBOARD="$MB_VENDOR"
+    [ -n "$MB_MODEL" ] && MOTHERBOARD="${MOTHERBOARD}${MOTHERBOARD:+ }$MB_MODEL"
+    [ -n "$MB_VERSION" ] && MOTHERBOARD="${MOTHERBOARD}${MOTHERBOARD:+ }(rev $MB_VERSION)"
+    if [ -z "$MOTHERBOARD" ]; then
+        if [ "$VIRT" != "none detected" ] && [ "$VIRT" != "none" ] && [ "$VIRT" != "unknown" ]; then
+            MOTHERBOARD="not exposed by virtual platform ($VIRT)"
+        else
+            MOTHERBOARD="not available"
+        fi
+    fi
     [ -n "$ROOT_FS" ] || ROOT_FS="unknown"
     [ -n "$IP_ADDR" ] || IP_ADDR="not available"
     summary_value "Operating system" "$OS_NAME"
+    summary_value "Motherboard" "$MOTHERBOARD"
     summary_value "CPU" "$CPU_MODEL"
     summary_value "CPU logical processors" "$CPU_COUNT"
     summary_value "Memory" "$MEM_VALUES"
     summary_value "Swap" "$SWAP_VALUES"
     summary_value "Virtualization" "$VIRT"
     summary_value "Root filesystem" "$ROOT_FS"
+    FS_USAGE=`df -P -h 2>/dev/null | awk '
+        NR > 1 && $(NF-1) ~ /^[0-9]+%$/ {
+            fs=$1; pct=$(NF-1); mp=$NF
+            if (fs !~ /^(tmpfs|udev|devtmpfs|proc|sysfs|cgroup|cgroup2|devfs|fdescfs|linprocfs|linsysfs|procfs|mfs)$/ && mp !~ /^\/(proc|sys|dev)(\/|$)/) {
+                printf "%s%s (%s): %s", sep, mp, fs, pct; sep=", "
+            }
+        }
+    '`
+    [ -n "$FS_USAGE" ] && summary_value "Filesystem usage" "$FS_USAGE"
+    if has zpool; then
+        POOL_USAGE=`zpool list 2>/dev/null | awk '
+            NR == 1 {
+                for (i=1; i<=NF; i++) col[$i]=i
+                next
+            }
+            {
+                name=$(col["NAME"]); size=$(col["SIZE"])
+                if (col["ALLOC"] > 0) alloc=$(col["ALLOC"])
+                else if (col["USED"] > 0) alloc=$(col["USED"])
+                if (col["CAP"] > 0) cap=$(col["CAP"])
+                if (name != "" && cap != "") {
+                    printf "%s%s %s used (%s of %s)", sep, name, cap, alloc, size
+                    sep=", "
+                }
+            }
+        '` 
+        [ -n "$POOL_USAGE" ] && summary_value "ZFS pool usage" "$POOL_USAGE"
+    fi
     summary_value "Network addresses" "$IP_ADDR"
     summary_value "Services ($SERVICE_LABEL)" "$SERVICE_COUNT"
 
