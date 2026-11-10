@@ -1,6 +1,6 @@
 #!/bin/sh
 #
-# Server Passport v0.5
+# Server Passport v0.6
 # Universal read-only server inventory
 #
 # Supported:
@@ -22,7 +22,7 @@
 #   ./hdreport.sh --help
 #
 
-VERSION="0.5"
+VERSION="0.6"
 
 PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 export PATH
@@ -430,6 +430,59 @@ collect_hardware() {
     esac
 }
 
+collect_smart() {
+    echo
+    echo "### SMART device discovery"
+
+    if ! has smartctl; then
+        echo "[unavailable: smartctl]"
+        return
+    fi
+
+    SMART_SCAN="$TMP/smart-scan"
+    SMART_DEVICES="$TMP/smart-devices"
+
+    smartctl --scan > "$SMART_SCAN" 2>&1
+    SMART_SCAN_RC=$?
+    cat "$SMART_SCAN"
+    [ "$SMART_SCAN_RC" -ne 0 ] && echo "[smartctl --scan exit code: $SMART_SCAN_RC]"
+
+    # Keep the device path and optional device type reported by smartctl.
+    # Example: /dev/bus/0 -d megaraid,2 # physical disk behind MegaRAID.
+    awk '
+        $1 ~ /^\/dev\// {
+            device = $1
+            type = ""
+            for (i = 2; i < NF; i++) {
+                if ($i == "-d") {
+                    type = $(i + 1)
+                    break
+                }
+            }
+            print device "|" type
+        }
+    ' "$SMART_SCAN" > "$SMART_DEVICES"
+
+    if [ ! -s "$SMART_DEVICES" ]; then
+        echo "[No SMART-capable devices discovered by smartctl]"
+        return
+    fi
+
+    while IFS='|' read SMART_DEVICE SMART_TYPE; do
+        [ -n "$SMART_DEVICE" ] || continue
+        echo
+        echo "### SMART data: $SMART_DEVICE${SMART_TYPE:+ (type: $SMART_TYPE)}"
+
+        if [ -n "$SMART_TYPE" ]; then
+            smartctl -a -d "$SMART_TYPE" "$SMART_DEVICE" 2>&1
+        else
+            smartctl -a "$SMART_DEVICE" 2>&1
+        fi
+        SMART_RC=$?
+        echo "[smartctl exit status: $SMART_RC]"
+    done < "$SMART_DEVICES"
+}
+
 collect_storage() {
     echo "## STORAGE"
 
@@ -463,7 +516,7 @@ collect_storage() {
             ;;
     esac
 
-    run "SMART disk inventory" smartctl --scan
+    collect_smart
     run "NVMe inventory" nvme list
 }
 
