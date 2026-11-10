@@ -1,6 +1,6 @@
 #!/bin/sh
 #
-# Server Passport v0.4
+# Server Passport v0.5
 # Universal read-only server inventory
 #
 # Supported:
@@ -22,7 +22,7 @@
 #   ./hdreport.sh --help
 #
 
-VERSION="0.4"
+VERSION="0.5"
 
 PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 export PATH
@@ -406,7 +406,23 @@ collect_hardware() {
             else
                 echo
                 echo "### SMBIOS inventory"
-                echo "[unavailable: dmidecode; install/use dmidecode if available for this FreeBSD release]"
+                echo "[unavailable: dmidecode]"
+                if has kenv; then
+                    run "SMBIOS kernel environment" sh -c 'kenv 2>/dev/null | grep -i "^smbios\\."'
+                fi
+                if [ -r /dev/mem ] && has dd && has strings; then
+                    echo
+                    echo "### Legacy BIOS ROM strings (heuristic; not structured SMBIOS data)"
+                    dd if=/dev/mem bs=65536 skip=15 count=1 2>/dev/null |
+                        strings 2>/dev/null |
+                        grep -iE 'AMI|American Megatrends|Award|Phoenix|BIOS Date|ASUS|Gigabyte|Micro-Star|MSI|Dell|Hewlett|Supermicro' |
+                        head -n 40
+                    echo "[ROM string scan is best-effort; matches do not establish motherboard model]"
+                else
+                    echo
+                    echo "### Legacy BIOS ROM strings"
+                    echo "[unavailable: /dev/mem is not readable or dd/strings is missing]"
+                fi
             fi
             run "PCI devices and bus locations" pciconf -lv
             run "Hardware messages" dmesg
@@ -565,7 +581,6 @@ collect_processes() {
             ;;
         FreeBSD)
             run "Listening sockets" sockstat -46 -l
-            run "Network sockets" netstat -an
             ;;
     esac
 }
@@ -702,10 +717,11 @@ collect_summary() {
                 MB_VENDOR=$(clean_dmi_value "$(dmidecode -s baseboard-manufacturer 2>/dev/null)")
                 MB_MODEL=$(clean_dmi_value "$(dmidecode -s baseboard-product-name 2>/dev/null)")
                 MB_VERSION=$(clean_dmi_value "$(dmidecode -s baseboard-version 2>/dev/null)")
-            elif has kenv; then
-                MB_VENDOR=$(clean_dmi_value "$(kenv smbios.planar.maker 2>/dev/null)")
-                MB_MODEL=$(clean_dmi_value "$(kenv smbios.planar.product 2>/dev/null)")
-                MB_VERSION=$(clean_dmi_value "$(kenv smbios.planar.version 2>/dev/null)")
+            fi
+            if has kenv; then
+                [ -n "$MB_VENDOR" ] || MB_VENDOR=$(clean_dmi_value "$(kenv smbios.planar.maker 2>/dev/null)")
+                [ -n "$MB_MODEL" ] || MB_MODEL=$(clean_dmi_value "$(kenv smbios.planar.product 2>/dev/null)")
+                [ -n "$MB_VERSION" ] || MB_VERSION=$(clean_dmi_value "$(kenv smbios.planar.version 2>/dev/null)")
             fi
             CPU_MODEL=`sysctl -n hw.model 2>/dev/null`
             CPU_COUNT=`sysctl -n hw.ncpu 2>/dev/null`
